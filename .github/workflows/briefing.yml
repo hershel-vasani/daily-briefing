@@ -2,9 +2,11 @@ name: Daily Briefing
 
 on:
   schedule:
-    # GitHub cron is in UTC. 11:00 UTC = 7:00 AM EDT (Detroit, summer).
-    - cron: "0 11 * * *"
-  workflow_dispatch:   # lets you trigger a run manually from the Actions tab
+    # GitHub cron is UTC and ignores daylight saving. We run at BOTH 11:00 and
+    # 12:00 UTC; the "gate" step below proceeds only when it's 7 AM in Detroit,
+    # so it stays at 7 AM local year-round across EDT/EST automatically.
+    - cron: "0 11,12 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,24 +18,40 @@ jobs:
       TZ: America/Detroit
       BRIEFING_SKIP_CALENDAR: "1"
     steps:
+      - name: Gate to 7 AM Detroit (skip the off-hour scheduled run)
+        run: |
+          HOUR=$(TZ=America/Detroit date +%H)
+          echo "Detroit hour is $HOUR"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" != "07" ]; then
+            echo "Not 7 AM in Detroit — skipping this run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+        id: gate
+
       - name: Check out repo
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install edge-tts
+        if: steps.gate.outputs.skip != 'true'
         run: pip install edge-tts
 
       - name: Generate briefing text
+        if: steps.gate.outputs.skip != 'true'
         run: python daily_briefing.py > briefing.txt
 
       - name: Synthesize speech (Libby)
+        if: steps.gate.outputs.skip != 'true'
         run: edge-tts --voice en-GB-LibbyNeural --file briefing.txt --write-media daily_briefing.mp3
 
       - name: Commit the MP3
+        if: steps.gate.outputs.skip != 'true'
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
