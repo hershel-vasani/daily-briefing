@@ -2,8 +2,7 @@ name: Daily Briefing
 
 on:
   schedule:
-    # TEST: running at 16:15 UTC (12:15 PM EDT) — change back to "0 11,12 * * *" with gate hour 07 for production
-    - cron: "15 16 * * *"
+    - cron: "0 11,12 * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,12 +15,12 @@ jobs:
       TZ: America/Detroit
       BRIEFING_SKIP_CALENDAR: "1"
     steps:
-      - name: Gate to 12 PM Detroit (TEST — change back to 07 for production)
+      - name: Gate to 7 AM Detroit (skip the off-hour scheduled run)
         run: |
           HOUR=$(TZ=America/Detroit date +%H)
           echo "Detroit hour is $HOUR"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" != "12" ]; then
-            echo "Not 12 PM in Detroit — skipping this run."
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" != "07" ]; then
+            echo "Not 7 AM in Detroit — skipping this run."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
         id: gate
