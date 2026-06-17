@@ -248,9 +248,9 @@ def get_news():
     parts = []
 
     local_feeds = [
-        "https://www.detroitnews.com/rss/",
-        "https://rss.freep.com/freep/news/local/",
-        "https://www.clickondetroit.com/rss/news.xml",
+        "https://www.clickondetroit.com/arc/outboundfeeds/rss/category/news/local/?outputType=xml",
+        "https://www.michiganradio.org/news.rss",
+        "https://www.wxyz.com/index.rss",
     ]
     local = []
     for feed in local_feeds:
@@ -261,9 +261,9 @@ def get_news():
         parts.append("Local Detroit headlines: " + format_stories(local[:3]))
 
     national_feeds = [
-        "https://feeds.feedburner.com/APTopStories",
         "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
         "https://feeds.npr.org/1001/rss.xml",
+        "https://www.theguardian.com/us-news/rss",
     ]
     national = []
     for feed in national_feeds:
@@ -275,7 +275,7 @@ def get_news():
 
     world_feeds = [
         "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "https://feeds.reuters.com/reuters/worldNews",
+        "https://www.theguardian.com/world/rss",
     ]
     world = []
     for feed in world_feeds:
