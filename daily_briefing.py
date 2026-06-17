@@ -132,8 +132,75 @@ def get_calendar():
 # News (RSS feeds with per-headline summaries)
 # ---------------------------------------------------------------------------
 
+def fetch_article_summary(url, max_words=75):
+    """Fetch article page and extract a clean recap.
+
+    Strategy:
+    1. og:description meta tag — always clean prose, no parsing noise.
+    2. <article>/<main> body paragraphs — scoped to avoid nav/JS pollution.
+    3. Return "" if both fail (caller falls back to RSS blurb).
+    """
+    html = fetch(url, timeout=8)
+    if not html:
+        return ""
+
+    # 1. og:description / meta description — always clean prose, purpose-built summary.
+    # Search only within <head> to avoid false matches in body script blocks.
+    head_m = re.search(r'<head[^>]*>(.*?)</head>', html, re.DOTALL | re.IGNORECASE)
+    head = head_m.group(1) if head_m else html
+
+    # Flexible two-pass: find any <meta> tag that has both a description key and content.
+    for meta_block in re.findall(r'<meta\s[^>]+>', head, re.IGNORECASE):
+        is_desc = re.search(
+            r'(?:property=["\']og:description["\']|name=["\']description["\'])',
+            meta_block, re.IGNORECASE
+        )
+        if not is_desc:
+            continue
+        content_m = re.search(r'content=["\']([^"\']{40,})["\']', meta_block, re.IGNORECASE)
+        if content_m:
+            desc = strip_html(content_m.group(1)).strip()
+            if len(desc.split()) >= 20:
+                return truncate_words(desc, max_words)
+
+    # 2. Article body paragraphs only
+    return _extract_body_paragraphs(html, max_words)
+
+
+def _extract_body_paragraphs(html, max_words):
+    """Extract clean paragraphs from <article> or <main>, avoiding JS/nav noise."""
+    # Narrow to article or main element first
+    scoped = html
+    for tag in ("article", "main"):
+        m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', html, re.DOTALL | re.IGNORECASE)
+        if m:
+            scoped = m.group(1)
+            break
+
+    paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', scoped, re.DOTALL | re.IGNORECASE)
+    collected, word_count = [], 0
+    for p in paragraphs:
+        text = strip_html(p).strip()
+        words = text.split()
+        # skip nav blurbs, JS, CSS, sharing bars, bylines, and image captions
+        if len(words) < 10:
+            continue
+        if '{' in text or text.lstrip().startswith('#'):
+            continue
+        first = words[0].lower()
+        if first in ('share', 'watch', 'listen', 'read', 'follow'):
+            continue
+        if any(x in text for x in ('Getty Images', 'AP Photo', 'Reuters/', 'AFP/')):
+            continue
+        collected.append(text)
+        word_count += len(words)
+        if word_count >= max_words:
+            break
+    return truncate_words(' '.join(collected), max_words) if collected else ""
+
+
 def rss_headlines(url, count=3):
-    """Return list of (title, description) tuples from an RSS feed."""
+    """Return list of (title, rss_desc, article_url) tuples from an RSS feed."""
     data = fetch(url)
     if not data:
         return []
@@ -143,14 +210,16 @@ def rss_headlines(url, count=3):
         for item in root.findall(".//item")[:count * 2]:
             t = item.find("title")
             d = item.find("description")
+            lnk = item.find("link")
             if t is not None and t.text:
                 clean_title = (t.text.strip()
                                .replace("&amp;", "and").replace("&lt;", "<").replace("&gt;", ">"))
                 if clean_title and "[" not in clean_title[:3]:
-                    desc = ""
+                    rss_desc = ""
                     if d is not None and d.text:
-                        desc = truncate_words(strip_html(d.text), 60)
-                    items.append((clean_title, desc))
+                        rss_desc = truncate_words(strip_html(d.text), 75)
+                    article_url = lnk.text.strip() if lnk is not None and lnk.text else ""
+                    items.append((clean_title, rss_desc, article_url))
             if len(items) == count:
                 break
         return items
@@ -159,13 +228,20 @@ def rss_headlines(url, count=3):
 
 
 def format_stories(stories):
+    """Format stories with a full recap: try fetching the article, fall back to RSS desc."""
     parts = []
-    for title, desc in stories:
-        if desc:
-            parts.append(f"{title}. {desc}")
+    for title, rss_desc, article_url in stories:
+        recap = ""
+        if article_url:
+            recap = fetch_article_summary(article_url)
+        if not recap:
+            recap = rss_desc  # fallback to RSS blurb
+        if recap:
+            parts.append(f"{title}. {recap}")
         else:
             parts.append(title)
-    return ". ".join(parts) + "."
+    result = ". ".join(parts) + "."
+    return re.sub(r'\.{2,}', '.', result)  # collapse "..", "..." for clean TTS
 
 
 def get_news():
