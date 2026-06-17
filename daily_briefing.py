@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Daily morning briefing — weather, calendar, news, and sports scores."""
+"""Daily morning briefing — weather, calendar, news, markets, and sports scores."""
 
 import json
 import os
+import re
 import sys
 import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
-# Set to "1" to skip the calendar section (e.g. when running in the cloud,
-# where there's no access to the local Apple Calendar).
 SKIP_CALENDAR = os.environ.get("BRIEFING_SKIP_CALENDAR") == "1"
 
 
 def fetch(url, timeout=10):
-    # Try urllib first; fall back to curl if SSL fails (Python 3.9 system SSL limitation)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -30,6 +28,20 @@ def fetch(url, timeout=10):
         return result.stdout if result.returncode == 0 else None
     except Exception:
         return None
+
+
+def strip_html(text):
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = (text.replace('&amp;', 'and').replace('&lt;', '<').replace('&gt;', '>')
+                .replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' '))
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def truncate_words(text, max_words=60):
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return ' '.join(words[:max_words]) + '...'
 
 
 # ---------------------------------------------------------------------------
@@ -117,33 +129,48 @@ def get_calendar():
 
 
 # ---------------------------------------------------------------------------
-# News (RSS feeds, no API key needed)
+# News (RSS feeds with per-headline summaries)
 # ---------------------------------------------------------------------------
 
 def rss_headlines(url, count=3):
+    """Return list of (title, description) tuples from an RSS feed."""
     data = fetch(url)
     if not data:
         return []
     try:
         root = ET.fromstring(data)
-        titles = []
+        items = []
         for item in root.findall(".//item")[:count * 2]:
             t = item.find("title")
+            d = item.find("description")
             if t is not None and t.text:
-                clean = t.text.strip().replace("&amp;", "and").replace("&lt;", "<").replace("&gt;", ">")
-                if clean and "[" not in clean[:3]:  # skip feed-meta items
-                    titles.append(clean)
-            if len(titles) == count:
+                clean_title = (t.text.strip()
+                               .replace("&amp;", "and").replace("&lt;", "<").replace("&gt;", ">"))
+                if clean_title and "[" not in clean_title[:3]:
+                    desc = ""
+                    if d is not None and d.text:
+                        desc = truncate_words(strip_html(d.text), 60)
+                    items.append((clean_title, desc))
+            if len(items) == count:
                 break
-        return titles
+        return items
     except Exception:
         return []
+
+
+def format_stories(stories):
+    parts = []
+    for title, desc in stories:
+        if desc:
+            parts.append(f"{title}. {desc}")
+        else:
+            parts.append(title)
+    return ". ".join(parts) + "."
 
 
 def get_news():
     parts = []
 
-    # Local Detroit
     local_feeds = [
         "https://www.detroitnews.com/rss/",
         "https://rss.freep.com/freep/news/local/",
@@ -155,9 +182,8 @@ def get_news():
         if len(local) >= 3:
             break
     if local:
-        parts.append("Local Detroit headlines: " + ". ".join(local[:3]) + ".")
+        parts.append("Local Detroit headlines: " + format_stories(local[:3]))
 
-    # National
     national_feeds = [
         "https://feeds.feedburner.com/APTopStories",
         "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
@@ -169,9 +195,8 @@ def get_news():
         if len(national) >= 3:
             break
     if national:
-        parts.append("National headlines: " + ". ".join(national[:3]) + ".")
+        parts.append("National headlines: " + format_stories(national[:3]))
 
-    # World
     world_feeds = [
         "https://feeds.bbci.co.uk/news/world/rss.xml",
         "https://feeds.reuters.com/reuters/worldNews",
@@ -182,9 +207,48 @@ def get_news():
         if len(world) >= 3:
             break
     if world:
-        parts.append("World headlines: " + ". ".join(world[:3]) + ".")
+        parts.append("World headlines: " + format_stories(world[:3]))
 
     return " ".join(parts) if parts else "News headlines are unavailable right now."
+
+
+# ---------------------------------------------------------------------------
+# Markets (Yahoo Finance, no API key needed)
+# ---------------------------------------------------------------------------
+
+def get_markets():
+    indices = [
+        ("%5EGSPC", "S and P 500"),
+        ("%5EDJI",  "Dow Jones"),
+        ("%5EIXIC", "NASDAQ"),
+    ]
+    results = []
+    for symbol, name in indices:
+        data = fetch(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d",
+            timeout=12,
+        )
+        if not data:
+            continue
+        try:
+            j = json.loads(data)
+            quote = j["chart"]["result"][0]["indicators"]["quote"][0]
+            closes = [c for c in quote["close"] if c is not None]
+            if len(closes) < 2:
+                continue
+            prev, last = closes[-2], closes[-1]
+            change = last - prev
+            pct = (change / prev) * 100
+            direction = "up" if change >= 0 else "down"
+            results.append(
+                f"{name} {direction} {abs(pct):.1f} percent, closing at {last:,.0f}"
+            )
+        except Exception:
+            continue
+
+    if not results:
+        return "Market data is unavailable right now."
+    return "At the last market close: " + ". ".join(results) + "."
 
 
 # ---------------------------------------------------------------------------
@@ -192,17 +256,17 @@ def get_news():
 # ---------------------------------------------------------------------------
 
 DETROIT_PRO = [
-    ("baseball",  "mlb",               "DET",  "Tigers"),
-    ("football",  "nfl",               "DET",  "Lions"),
-    ("basketball","nba",               "DET",  "Pistons"),
-    ("hockey",    "nhl",               "DET",  "Red Wings"),
+    ("baseball",   "mlb",  "DET", "Tigers"),
+    ("football",   "nfl",  "DET", "Lions"),
+    ("basketball", "nba",  "DET", "Pistons"),
+    ("hockey",     "nhl",  "DET", "Red Wings"),
 ]
 
 NATIONAL_LEAGUES = [
-    ("football",  "nfl"),
-    ("basketball","nba"),
-    ("baseball",  "mlb"),
-    ("hockey",    "nhl"),
+    ("football",   "nfl"),
+    ("basketball", "nba"),
+    ("baseball",   "mlb"),
+    ("hockey",     "nhl"),
 ]
 
 MSU_LEAGUES = [
@@ -220,7 +284,7 @@ def espn_scoreboard(sport, league, date_str, extra=""):
 
 
 def parse_game(competition):
-    """Return (home_abbr, away_abbr, score_str) or None if not final."""
+    """Return (home_abbr, away_abbr, score_str, home_name, away_name) or None if not final."""
     try:
         if competition["status"]["type"]["name"] != "STATUS_FINAL":
             return None
@@ -239,12 +303,42 @@ def parse_game(competition):
         return None
 
 
+def get_world_cup():
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    results = []
+    data = espn_scoreboard("soccer", "fifa.world", yesterday)
+    if data:
+        try:
+            events = json.loads(data).get("events", [])
+            for event in events:
+                comp = event["competitions"][0]
+                try:
+                    # Soccer reports finished games as STATUS_FULL_TIME, not
+                    # STATUS_FINAL — the `completed` flag is reliable across sports.
+                    if not comp["status"]["type"].get("completed"):
+                        continue
+                    competitors = comp["competitors"]
+                    home = next(c for c in competitors if c["homeAway"] == "home")
+                    away = next(c for c in competitors if c["homeAway"] == "away")
+                    results.append(
+                        f"{away['team']['displayName']} {away['score']}, "
+                        f"{home['team']['displayName']} {home['score']}"
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if not results:
+        return ""
+    return "World Cup scores from yesterday: " + ". ".join(results) + "."
+
+
 def get_sports():
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
     detroit_results = []
     seen_games = set()
 
-    # Detroit pro teams
     for sport, league, abbr, name in DETROIT_PRO:
         raw = espn_scoreboard(sport, league, yesterday)
         if not raw:
@@ -260,7 +354,6 @@ def get_sports():
                     detroit_results.append(parsed[2])
                     seen_games.add(parsed[2])
 
-    # Michigan State
     for sport, league in MSU_LEAGUES:
         raw = espn_scoreboard(sport, league, yesterday)
         if not raw:
@@ -276,7 +369,6 @@ def get_sports():
                     detroit_results.append(parsed[2])
                     seen_games.add(parsed[2])
 
-    # National scores (top 3 per league, skip Detroit)
     national_results = []
     for sport, league in NATIONAL_LEAGUES:
         raw = espn_scoreboard(sport, league, yesterday)
@@ -312,6 +404,10 @@ def get_sports():
     if national_results:
         sections.append("Other scores: " + ". ".join(national_results) + ".")
 
+    world_cup = get_world_cup()
+    if world_cup:
+        sections.append(world_cup)
+
     return " ".join(sections)
 
 
@@ -345,12 +441,14 @@ def main():
     print("Fetching news...", file=sys.stderr)
     sections.append(get_news())
 
+    print("Fetching markets...", file=sys.stderr)
+    sections.append(get_markets())
+
     print("Fetching sports...", file=sys.stderr)
     sections.append(get_sports())
 
     sections.append("That's your daily update. Have a great day!")
 
-    # Print the final briefing text to stdout (Shortcut reads this)
     print(" ".join(sections))
 
 
